@@ -536,8 +536,8 @@
   <!-- 상단 툴바 -->
   <div class="toolbar">
     <div class="tool-group">
-      <button class="btn btn-primary" onclick="saveToJsonFile()" title="data.json 파일로 저장 (Ctrl+S)">💾 JSON 저장</button>
-      <button class="btn" onclick="loadFromJsonFile()" title="기존 data.json 불러오기">📂 JSON 열기</button>
+      <button class="btn btn-primary" onclick="saveToJsonFile()" title="NeonDB에 수동 저장 (Ctrl+S)">💾 DB 저장</button>
+      <button class="btn" onclick="loadFromJsonFile()" title="NeonDB에서 저장된 계산표 불러오기">📂 DB 불러오기</button>
       <button class="btn" onclick="undo()" title="실행 취소 (Ctrl+Z)">↩ 실행취소</button>
     </div>
 
@@ -615,7 +615,7 @@
   <div class="tab-bar" id="tabBar">
     <div id="tabsList" style="display:flex; gap:4px;"></div>
     <button class="tab-add-btn" onclick="createNewTabPrompt()">+ 탭생성</button>
-    <div class="status-info" id="statusInfo">자동저장(LocalStorage) 활성 | Web_Excel v.1.10</div>
+    <div class="status-info" id="statusInfo">로컬 임시백업 활성 · NeonDB 수동 저장 | Web_Excel v.1.10</div>
   </div>
 
   <!-- 우클릭 컨텍스트 메뉴 -->
@@ -905,7 +905,7 @@ function createManualSheet() {
   setManualCell('A18', '• 팔레트 색상 선택: 배경색/글자색 버튼 클릭 시 테마 색(보라·빨강 계열 포함)·표준 색 팔레트 팝업 제공');
   setManualCell('A19', '• 팝업 메모장: 셀 우클릭 → [메모 넣기] 선택 후 저장 시 셀에 "메모"가 표시되며, 클릭하면 메모창이 열립니다.');
   setManualCell('A20', '• 탭 관리: 하단 [+ 탭생성]으로 새 기초 엑셀 탭 추가 / 탭 더블클릭(이름변경), 탭 우클릭(삭제)');
-  setManualCell('A21', '• 파일 저장: 작업 내용은 브라우저 LocalStorage에 자동 백업되며, [JSON 저장] 클릭 시 로컬 data.json 파일로 저장됩니다.');
+  setManualCell('A21', '• 파일 저장: LocalStorage는 임시백업이며 [DB 저장]을 눌러야 NeonDB에 확정 저장됩니다. [DB 불러오기]로 서버 데이터 복원.');
 
   setManualCell('B23', '', { memo: '이곳은 샘플 메모장입니다.\n실험 조건이나 상세 정비 내역을 자유롭게 기록하고 저장할 수 있습니다.' });
   setManualCell('A23', '◀ 오른쪽 B23 셀 클릭 시 메모장 확인 가능', { bold: true, color: '#107c41' });
@@ -1955,72 +1955,82 @@ function createNewTabPrompt() {
   selectCell(0, 0);
 }
 
-async function saveToJsonFile() {
-  const jsonStr = JSON.stringify(workbook, null, 2);
-  saveToLocalStorage();
-
-  if (window.showSaveFilePicker) {
-    try {
-      if (!fileHandle) {
-        fileHandle = await window.showSaveFilePicker({
-          suggestedName: 'data.json',
-          types: [{
-            description: 'JSON Data File',
-            accept: { 'application/json': ['.json'] }
-          }]
-        });
-      }
-      const writable = await fileHandle.createWritable();
-      await writable.write(jsonStr);
-      await writable.close();
-      document.getElementById('statusInfo').textContent = `저장 완료: ${fileHandle.name} (${new Date().toLocaleTimeString()})`;
-      return;
-    } catch (err) {
-      if (err.name === 'AbortError') return;
-      fileHandle = null;
-    }
+// NeonDB 수동 저장: 브라우저에는 DB 접속 문자열을 절대 전달하지 않습니다.
+let dbVersion = null;
+let dbPassword = null;
+let dbBusy = false;
+function dbStatus(message) {
+  document.getElementById('statusInfo').textContent = message;
+}
+function askDbPassword() {
+  if (dbPassword) return dbPassword;
+  const entered = prompt('Web_Excel DB 비밀번호를 입력하세요 (Vercel APP_PASSWORD):');
+  if (!entered) return null;
+  dbPassword = entered;
+  return entered;
+}
+async function dbRequest(method, payload) {
+  const password = askDbPassword();
+  if (!password) throw new Error('비밀번호 입력이 취소되었습니다.');
+  const response = await fetch('/api/workbook', {
+    method,
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json', 'X-App-Password': password },
+    ...(payload ? { body: JSON.stringify(payload) } : {})
+  });
+  let result = {};
+  try { result = await response.json(); } catch (_) {}
+  if (response.status === 401) {
+    dbPassword = null;
+    throw new Error('DB 비밀번호가 올바르지 않습니다.');
   }
-
-  const blob = new Blob([jsonStr], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'data.json';
-  a.click();
-  URL.revokeObjectURL(url);
-  document.getElementById('statusInfo').textContent = `다운로드 완료: data.json (${new Date().toLocaleTimeString()})`;
+  if (response.status === 409) {
+    throw new Error('다른 기기에서 저장한 최신 데이터가 있습니다. 서버 데이터를 확인한 후 다시 작업하세요.');
+  }
+  if (!response.ok) throw new Error(result.error || 'DB 요청 실패 (HTTP ' + response.status + ')');
+  return result;
 }
-
-function loadFromJsonFile() {
-  document.getElementById('hiddenFileInput').click();
+async function saveToJsonFile() {
+  if (dbBusy) return;
+  if (isEditing) finishEditing(true);
+  dbBusy = true;
+  dbStatus('NeonDB 저장 중…');
+  try {
+    const result = await dbRequest('PUT', { workbook, version: dbVersion });
+    dbVersion = result.version;
+    saveToLocalStorage();
+    dbStatus('NeonDB 저장 완료 · 버전 ' + dbVersion + ' · ' + new Date().toLocaleTimeString());
+  } catch (error) {
+    dbStatus('DB 저장 실패 · ' + error.message);
+    alert('NeonDB 저장 실패: ' + error.message + '\n현재 데이터는 브라우저 임시백업에 남아 있습니다.');
+  } finally {
+    dbBusy = false;
+  }
 }
-
-function handleFileSelect(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    try {
-      const parsed = JSON.parse(e.target.result);
-      if (parsed && Array.isArray(parsed.sheets) && parsed.sheets.length > 0) {
-        workbook = parsed;
-        const sheet1Idx = workbook.sheets.findIndex(s => s.name === 'Sheet1');
-        workbook.activeSheetIndex = sheet1Idx >= 0 ? sheet1Idx : 0;
-        historyStack = {};
-        saveToLocalStorage();
-        renderTabs();
-        renderGrid();
-        selectCell(0, 0);
-        document.getElementById('statusInfo').textContent = `불러오기 완료: ${file.name}`;
-      } else {
-        alert('올바른 Web_Excel data.json 형식이 아닙니다.');
-      }
-    } catch (err) {
-      alert('JSON 파일을 읽는 중 오류가 발생했습니다.');
+async function loadFromJsonFile() {
+  if (dbBusy) return;
+  if (!confirm('NeonDB의 저장본으로 현재 화면을 교체합니다. 저장하지 않은 변경은 사라질 수 있습니다. 계속할까요?')) return;
+  dbBusy = true;
+  dbStatus('NeonDB 불러오는 중…');
+  try {
+    const result = await dbRequest('GET');
+    if (!result.workbook || !Array.isArray(result.workbook.sheets) || !result.workbook.sheets.length) {
+      throw new Error('저장된 계산표 형식이 올바르지 않습니다.');
     }
-    event.target.value = '';
-  };
-  reader.readAsText(file, 'UTF-8');
+    workbook = result.workbook;
+    dbVersion = result.version;
+    historyStack = {};
+    saveToLocalStorage();
+    renderTabs();
+    renderGrid();
+    selectCell(0, 0);
+    dbStatus('NeonDB 불러오기 완료 · 버전 ' + dbVersion);
+  } catch (error) {
+    dbStatus('DB 불러오기 실패 · ' + error.message);
+    alert('NeonDB 불러오기 실패: ' + error.message);
+  } finally {
+    dbBusy = false;
+  }
 }
 
 init();
