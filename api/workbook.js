@@ -17,8 +17,13 @@ export default async function handler(req, res) {
   if (!process.env.DATABASE_URL || !process.env.APP_PASSWORD) {
     return res.status(503).json({error:'Server environment is not configured'});
   }
-  if (!sameSecret(req.headers['x-app-password'],process.env.APP_PASSWORD)) {
-    return res.status(401).json({error:'Unauthorized'});
+  if (req.method === 'PUT') {
+    if (!/^\d{4}$/.test(process.env.APP_PASSWORD)) {
+      return res.status(503).json({error:'APP_PASSWORD must be exactly four digits'});
+    }
+    if (!sameSecret(req.headers['x-app-password'], process.env.APP_PASSWORD)) {
+      return res.status(401).json({error:'Unauthorized'});
+    }
   }
   try {
     const sql=neon(process.env.DATABASE_URL);
