@@ -1,0 +1,9 @@
+{
+  "name": "web-excel-neon",
+  "private": true,
+  "type": "module",
+  "scripts": {},
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.0"
+  }
+}
