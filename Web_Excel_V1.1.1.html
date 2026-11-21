@@ -529,15 +529,69 @@
     gap: 6px;
     background: #dce6f7;
   }
+
+/* 차콜 다크모드: 계산표의 사용자 지정 셀 색상은 유지합니다. */
+body.dark-mode {
+  color-scheme: dark;
+  --border-color:#414650;
+  --header-bg:#30353d;
+  --header-active:#445464;
+  --select-border:#68c79a;
+  --select-bg:rgba(104,199,154,.13);
+  --toolbar-bg:#282d34;
+  background:#242830;
+  color:#e3e7ee;
+}
+body.dark-mode .toolbar,body.dark-mode .formula-bar,body.dark-mode .tab-bar {
+  background:#282d34;color:#e3e7ee;border-color:#414650;
+}
+body.dark-mode .tool-group {border-color:#454b55}
+body.dark-mode .btn,body.dark-mode .color-btn,body.dark-mode select.tool-select,
+body.dark-mode .tab-add-btn,body.dark-mode .cell-address-box,
+body.dark-mode #formulaInput,body.dark-mode #dbPinInput {
+  background:#353b44;color:#e5e9ee;border-color:#59616e;
+}
+body.dark-mode .btn-primary {background:#17774b;color:#fff;border-color:#249463}
+body.dark-mode .btn:hover,body.dark-mode .color-btn:hover {background:#444c57}
+body.dark-mode .btn-primary:hover {background:#1b8b57}
+body.dark-mode .sheet-container {background:#252a32}
+body.dark-mode table.excel-grid tbody td {background:#2b3038;color:#e5e9ee}
+body.dark-mode table.excel-grid tbody td.in-range {background-color:#3b554a !important}
+body.dark-mode table.excel-grid tbody th.row-header,
+body.dark-mode table.excel-grid thead th.col-header,
+body.dark-mode table.excel-grid thead th.corner-header {color:#d7dce4;border-color:#49505b}
+body.dark-mode .tab-item {background:#333943;color:#cfd7e0;border-color:#555e6b}
+body.dark-mode .tab-item.active {background:#4a525e;color:#8de0b6}
+body.dark-mode .status-info {color:#cbd2db}
+body.dark-mode #cellEditor {background:#363e48;color:#fff;border-color:#68c79a}
+body.dark-mode #contextMenu,body.dark-mode .color-palette-popup {background:#303741;color:#e4e8ee;border-color:#606b77}
+body.dark-mode #contextMenu div:hover,body.dark-mode .palette-action-item:hover {background:#42534d;color:#a7edc8}
+body.dark-mode .palette-section-title {color:#dfe6ed}
+body.dark-mode .memo-modal,body.dark-mode .memo-modal-footer,body.dark-mode .memo-modal-body {background:#303741;color:#e4e8ee;border-color:#5c6977}
+body.dark-mode .memo-modal-header {background:#3d4856;color:#e4e8ee;border-color:#596879}
+body.dark-mode .memo-modal-body textarea {background:#252a32;color:#e4e8ee;border-color:#596879}
+body.dark-mode .memo-modal-close {color:#e4e8ee}
+#dbToast {
+  position:fixed;top:14px;left:50%;transform:translateX(-50%);
+  z-index:1000;display:none;max-width:min(92vw,460px);
+  padding:10px 20px;border-radius:9px;background:#353e49;color:#fff;
+  box-shadow:0 5px 22px rgba(0,0,0,.27);font-size:13px;
+  text-align:center;pointer-events:none;
+}
+#dbToast.success {background:#246346}
+#dbToast.error {background:#913e3e}
+
 </style>
 </head>
 <body>
+<div id="dbToast" role="status" aria-live="polite"></div>
 
   <!-- 상단 툴바 -->
   <div class="toolbar">
     <div class="tool-group">
       <input id="dbPinInput" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" placeholder="저장 PIN 4자리" aria-label="DB 저장 비밀번호 4자리" style="width:112px;padding:4px 6px;border:1px solid #aaa;border-radius:3px;font:12px 'Malgun Gothic',sans-serif" />
       <button class="btn btn-primary" onclick="saveToJsonFile()" title="PIN 확인 후 NeonDB에 수동 저장 (Ctrl+S)">💾 DB 저장</button>
+      <button class="btn" id="darkModeToggle" type="button" onclick="toggleDarkMode()" title="밝은 모드와 차콜 다크모드 전환">🌙 다크</button>
       <button class="btn" onclick="undo()" title="실행 취소 (Ctrl+Z)">↩ 실행취소</button>
     </div>
 
@@ -915,6 +969,7 @@ function createManualSheet() {
 
 function init() {
   buildColorPaletteUI();
+  restoreDarkMode();
   const saved = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
   if (saved) {
     try {
@@ -1528,6 +1583,8 @@ function bindGlobalEvents() {
   });
 
   editor.addEventListener('keydown', (e) => {
+    // 편집기의 방향키가 문서 전체 키보드 핸들러까지 전파되면 두 칸 이동합니다.
+    e.stopPropagation();
     if (e.key === 'Enter') {
       e.preventDefault();
       finishEditing(true);
@@ -1588,6 +1645,8 @@ function bindGlobalEvents() {
 
   document.addEventListener('keydown', (e) => {
     if (document.getElementById('memoModalBackdrop').style.display === 'flex') return;
+    // PIN, 툴바의 입력/선택창 등에 포커스가 있을 때 셀 키보드 조작 금지.
+    if (e.target instanceof Element && e.target.closest('input,textarea,select,button,[contenteditable="true"]')) return;
     if (document.activeElement === formulaInput) return;
     if (isEditing) return;
 
@@ -1956,6 +2015,27 @@ function createNewTabPrompt() {
   selectCell(0, 0);
 }
 
+let toastTimer = null;
+function showDbToast(message, type='info', ms=2300) {
+  const node = document.getElementById('dbToast');
+  clearTimeout(toastTimer);
+  node.textContent = message;
+  node.className = type;
+  node.style.display = 'block';
+  toastTimer = setTimeout(() => { node.style.display = 'none'; }, ms);
+}
+function restoreDarkMode() {
+  let dark = false;
+  try { dark = localStorage.getItem('web_excel_dark_mode') === '1'; } catch(_) {}
+  document.body.classList.toggle('dark-mode', dark);
+  document.getElementById('darkModeToggle').textContent = dark ? '☀️ 라이트' : '🌙 다크';
+}
+function toggleDarkMode() {
+  const dark = !document.body.classList.contains('dark-mode');
+  document.body.classList.toggle('dark-mode', dark);
+  document.getElementById('darkModeToggle').textContent = dark ? '☀️ 라이트' : '🌙 다크';
+  try { localStorage.setItem('web_excel_dark_mode', dark ? '1' : '0'); } catch(_) {}
+}
 // 앱 열기: 비밀번호 없이 서버 데이터 1회 조회 / 저장: 4자리 PIN 검증
 let dbVersion = null;
 let dbBusy = false;
@@ -1965,7 +2045,7 @@ function dbStatus(message) {
 }
 function validPin() {
   const pin = document.getElementById('dbPinInput').value;
-  if (!/^\d{4}$/.test(pin)) throw new Error('상단에 숫자 4자리 저장 PIN을 입력하세요.');
+  if (!/^\d{4}$/.test(pin)) throw new Error('저장 PIN 숫자 4자리를 입력하세요.');
   return pin;
 }
 async function dbRequest(method, payload, pin = null) {
@@ -2037,12 +2117,12 @@ async function autoLoadFromDb() {
 async function saveToJsonFile() {
   if (dbBusy) return;
   if (!dbReady) {
-    alert('NeonDB 불러오기를 완료하지 못했습니다. 새로고침하여 다시 연결해 주세요.');
+    showDbToast('DB 연결이 안 됐습니다. 새로고침 후 다시 시도하세요.', 'error', 3200);
     return;
   }
   let pin;
   try { pin = validPin(); }
-  catch(error) { alert(error.message); document.getElementById('dbPinInput').focus(); return; }
+  catch(error) { showDbToast(error.message, 'error'); document.getElementById('dbPinInput').focus(); return; }
   if (isEditing) finishEditing(true);
   dbBusy = true;
   dbStatus('NeonDB 수동 저장 중…');
@@ -2051,9 +2131,11 @@ async function saveToJsonFile() {
     dbVersion = result.version;
     saveToLocalStorage();
     dbStatus('NeonDB 저장 완료 · 버전 ' + dbVersion + ' · ' + new Date().toLocaleTimeString());
+    showDbToast('✓ NeonDB 저장 완료', 'success');
   } catch(error) {
     dbStatus('DB 저장 실패 · ' + error.message);
-    alert('NeonDB 저장 실패: ' + error.message + '\n현재 내용은 브라우저 임시백업에 남아 있습니다.');
+    showDbToast('DB 저장 실패: ' + error.message, 'error', 3300);
+    if (error.message.includes('PIN')) document.getElementById('dbPinInput').focus();
   } finally {
     dbBusy = false;
   }
