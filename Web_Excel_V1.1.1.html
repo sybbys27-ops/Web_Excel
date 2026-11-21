@@ -536,8 +536,8 @@
   <!-- 상단 툴바 -->
   <div class="toolbar">
     <div class="tool-group">
-      <button class="btn btn-primary" onclick="saveToJsonFile()" title="NeonDB에 수동 저장 (Ctrl+S)">💾 DB 저장</button>
-      <button class="btn" onclick="loadFromJsonFile()" title="NeonDB에서 저장된 계산표 불러오기">📂 DB 불러오기</button>
+      <input id="dbPinInput" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" placeholder="저장 PIN 4자리" aria-label="DB 저장 비밀번호 4자리" style="width:112px;padding:4px 6px;border:1px solid #aaa;border-radius:3px;font:12px 'Malgun Gothic',sans-serif" />
+      <button class="btn btn-primary" onclick="saveToJsonFile()" title="PIN 확인 후 NeonDB에 수동 저장 (Ctrl+S)">💾 DB 저장</button>
       <button class="btn" onclick="undo()" title="실행 취소 (Ctrl+Z)">↩ 실행취소</button>
     </div>
 
@@ -615,7 +615,7 @@
   <div class="tab-bar" id="tabBar">
     <div id="tabsList" style="display:flex; gap:4px;"></div>
     <button class="tab-add-btn" onclick="createNewTabPrompt()">+ 탭생성</button>
-    <div class="status-info" id="statusInfo">로컬 임시백업 활성 · NeonDB 수동 저장 | Web_Excel v.1.10</div>
+    <div class="status-info" id="statusInfo">NeonDB 자동 불러오기 대기 | Web_Excel v.1.10</div>
   </div>
 
   <!-- 우클릭 컨텍스트 메뉴 -->
@@ -905,7 +905,7 @@ function createManualSheet() {
   setManualCell('A18', '• 팔레트 색상 선택: 배경색/글자색 버튼 클릭 시 테마 색(보라·빨강 계열 포함)·표준 색 팔레트 팝업 제공');
   setManualCell('A19', '• 팝업 메모장: 셀 우클릭 → [메모 넣기] 선택 후 저장 시 셀에 "메모"가 표시되며, 클릭하면 메모창이 열립니다.');
   setManualCell('A20', '• 탭 관리: 하단 [+ 탭생성]으로 새 기초 엑셀 탭 추가 / 탭 더블클릭(이름변경), 탭 우클릭(삭제)');
-  setManualCell('A21', '• 파일 저장: LocalStorage는 임시백업이며 [DB 저장]을 눌러야 NeonDB에 확정 저장됩니다. [DB 불러오기]로 서버 데이터 복원.');
+  setManualCell('A21', '• 데이터: 시작 시 NeonDB에서 1회 자동 불러오며, 4자리 PIN 입력 후 [DB 저장]을 눌러야 서버에 저장됩니다. LocalStorage는 임시백업입니다.');
 
   setManualCell('B23', '', { memo: '이곳은 샘플 메모장입니다.\n실험 조건이나 상세 정비 내역을 자유롭게 기록하고 저장할 수 있습니다.' });
   setManualCell('A23', '◀ 오른쪽 B23 셀 클릭 시 메모장 확인 가능', { bold: true, color: '#107c41' });
@@ -950,6 +950,7 @@ function init() {
   renderGrid();
   selectCell(0, 0);
   bindGlobalEvents();
+  void autoLoadFromDb();
 }
 
 function getActiveSheet() {
@@ -1955,67 +1956,59 @@ function createNewTabPrompt() {
   selectCell(0, 0);
 }
 
-// NeonDB 수동 저장: 브라우저에는 DB 접속 문자열을 절대 전달하지 않습니다.
+// 앱 열기: 비밀번호 없이 서버 데이터 1회 조회 / 저장: 4자리 PIN 검증
 let dbVersion = null;
-let dbPassword = null;
 let dbBusy = false;
+let dbReady = false;
 function dbStatus(message) {
   document.getElementById('statusInfo').textContent = message;
 }
-function askDbPassword() {
-  if (dbPassword) return dbPassword;
-  const entered = prompt('Web_Excel DB 비밀번호를 입력하세요 (Vercel APP_PASSWORD):');
-  if (!entered) return null;
-  dbPassword = entered;
-  return entered;
+function validPin() {
+  const pin = document.getElementById('dbPinInput').value;
+  if (!/^\d{4}$/.test(pin)) throw new Error('상단에 숫자 4자리 저장 PIN을 입력하세요.');
+  return pin;
 }
-async function dbRequest(method, payload) {
-  const password = askDbPassword();
-  if (!password) throw new Error('비밀번호 입력이 취소되었습니다.');
-  const response = await fetch('/api/workbook', {
-    method,
-    cache: 'no-store',
-    headers: { 'Content-Type': 'application/json', 'X-App-Password': password },
-    ...(payload ? { body: JSON.stringify(payload) } : {})
-  });
-  let result = {};
-  try { result = await response.json(); } catch (_) {}
-  if (response.status === 401) {
-    dbPassword = null;
-    throw new Error('DB 비밀번호가 올바르지 않습니다.');
-  }
-  if (response.status === 409) {
-    throw new Error('다른 기기에서 저장한 최신 데이터가 있습니다. 서버 데이터를 확인한 후 다시 작업하세요.');
-  }
-  if (!response.ok) throw new Error(result.error || 'DB 요청 실패 (HTTP ' + response.status + ')');
-  return result;
-}
-async function saveToJsonFile() {
-  if (dbBusy) return;
-  if (isEditing) finishEditing(true);
-  dbBusy = true;
-  dbStatus('NeonDB 저장 중…');
+async function dbRequest(method, payload, pin = null) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
   try {
-    const result = await dbRequest('PUT', { workbook, version: dbVersion });
-    dbVersion = result.version;
-    saveToLocalStorage();
-    dbStatus('NeonDB 저장 완료 · 버전 ' + dbVersion + ' · ' + new Date().toLocaleTimeString());
-  } catch (error) {
-    dbStatus('DB 저장 실패 · ' + error.message);
-    alert('NeonDB 저장 실패: ' + error.message + '\n현재 데이터는 브라우저 임시백업에 남아 있습니다.');
+    const response = await fetch('/api/workbook', {
+      method, cache: 'no-store', signal: controller.signal,
+      headers: {
+        ...(payload ? {'Content-Type': 'application/json'} : {}),
+        ...(pin ? {'X-App-Password': pin} : {})
+      },
+      ...(payload ? {body: JSON.stringify(payload)} : {})
+    });
+    let result = {};
+    try { result = await response.json(); } catch (_) {}
+    if (response.status === 401) throw new Error('저장 PIN이 올바르지 않습니다.');
+    if (response.status === 409) throw new Error('다른 기기에서 데이터가 변경되었습니다. 새로고침 후 확인하세요.');
+    if (!response.ok) {
+      const error = new Error(result.error || 'DB 요청 실패 (' + response.status + ')');
+      error.status = response.status;
+      throw error;
+    }
+    return result;
+  } catch(error) {
+    if(error.name === 'AbortError') throw new Error('DB 연결이 8초를 초과했습니다. 네트워크와 서버 상태를 확인하세요.');
+    throw error;
   } finally {
-    dbBusy = false;
+    clearTimeout(timer);
   }
 }
-async function loadFromJsonFile() {
+async function autoLoadFromDb() {
   if (dbBusy) return;
-  if (!confirm('NeonDB의 저장본으로 현재 화면을 교체합니다. 저장하지 않은 변경은 사라질 수 있습니다. 계속할까요?')) return;
   dbBusy = true;
-  dbStatus('NeonDB 불러오는 중…');
+  dbReady = false;
+  // 로딩 중 화면 조작을 잠시 막아, 늦게 도착한 DB 데이터가 작업을 덮어쓰는 것을 방지.
+  const sheetArea = document.getElementById('sheetContainer');
+  sheetArea.style.pointerEvents = 'none';
+  dbStatus('NeonDB 자동 불러오는 중 (최대 8초)…');
   try {
     const result = await dbRequest('GET');
     if (!result.workbook || !Array.isArray(result.workbook.sheets) || !result.workbook.sheets.length) {
-      throw new Error('저장된 계산표 형식이 올바르지 않습니다.');
+      throw new Error('저장된 계산표 형식이 잘못되었습니다.');
     }
     workbook = result.workbook;
     dbVersion = result.version;
@@ -2024,10 +2017,43 @@ async function loadFromJsonFile() {
     renderTabs();
     renderGrid();
     selectCell(0, 0);
-    dbStatus('NeonDB 불러오기 완료 · 버전 ' + dbVersion);
-  } catch (error) {
-    dbStatus('DB 불러오기 실패 · ' + error.message);
-    alert('NeonDB 불러오기 실패: ' + error.message);
+    dbReady = true;
+    dbStatus('NeonDB 자동 불러오기 완료 · 버전 ' + dbVersion);
+  } catch(error) {
+    if(error.status === 404) {
+      dbVersion = null;
+      dbReady = true;
+      dbStatus('NeonDB 저장본 없음 · 새 계산표를 작성 후 DB 저장하세요.');
+    } else {
+      dbReady = false;
+      dbStatus('DB 불러오기 실패 · 로컬 데이터 유지 · 새로고침 후 재시도');
+      alert('NeonDB 자동 불러오기 실패: ' + error.message + '\n현재 로컬 임시백업은 유지됩니다. 서버 데이터를 확인하기 전에는 DB 저장을 차단합니다.');
+    }
+  } finally {
+    sheetArea.style.pointerEvents = '';
+    dbBusy = false;
+  }
+}
+async function saveToJsonFile() {
+  if (dbBusy) return;
+  if (!dbReady) {
+    alert('NeonDB 불러오기를 완료하지 못했습니다. 새로고침하여 다시 연결해 주세요.');
+    return;
+  }
+  let pin;
+  try { pin = validPin(); }
+  catch(error) { alert(error.message); document.getElementById('dbPinInput').focus(); return; }
+  if (isEditing) finishEditing(true);
+  dbBusy = true;
+  dbStatus('NeonDB 수동 저장 중…');
+  try {
+    const result = await dbRequest('PUT', {workbook, version: dbVersion}, pin);
+    dbVersion = result.version;
+    saveToLocalStorage();
+    dbStatus('NeonDB 저장 완료 · 버전 ' + dbVersion + ' · ' + new Date().toLocaleTimeString());
+  } catch(error) {
+    dbStatus('DB 저장 실패 · ' + error.message);
+    alert('NeonDB 저장 실패: ' + error.message + '\n현재 내용은 브라우저 임시백업에 남아 있습니다.');
   } finally {
     dbBusy = false;
   }
