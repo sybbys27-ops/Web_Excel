@@ -1527,10 +1527,13 @@ function toggleMultiCell(r, c) {
   if (multiSelectedKeys.has(key)) multiSelectedKeys.delete(key);
   else multiSelectedKeys.add(key);
   if (!multiSelectedKeys.size) multiSelectedKeys.add(key);
-  selection.startRow=r;
-  selection.endRow=r;
-  selection.startCol=targetCol;
-  selection.endCol=merge?merge.endCol:targetCol;
+  const activeKey = multiSelectedKeys.has(key) ? key : [...multiSelectedKeys].at(-1);
+  const activePos = parseCellKey(activeKey);
+  const activeMerge = getMergeAt(sheet,activePos.r,activePos.c);
+  selection.startRow=activePos.r;
+  selection.endRow=activePos.r;
+  selection.startCol=activePos.c;
+  selection.endCol=activeMerge?activeMerge.endCol:activePos.c;
   updateSelectionUI();
 }
 
