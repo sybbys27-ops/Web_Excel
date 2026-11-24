@@ -1239,6 +1239,23 @@ function getMergeAt(sheet, r, c) {
   return sheet.merges.find(m => m.row === r && c >= m.startCol && c <= m.endCol) || null;
 }
 
+// 다크모드에서도 컬러 배경과 글자의 명도 대비를 자동으로 확보합니다.
+function colorLuminance(hex) {
+  if (typeof hex !== 'string' || !/^#[0-9a-f]{6}$/i.test(hex)) return null;
+  const rgb = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255);
+  const linear = rgb.map(v => v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+  return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
+}
+function readableCellTextColor(background, preferred) {
+  const bg = colorLuminance(background);
+  const fg = colorLuminance(preferred);
+  if (bg === null) return preferred;
+  const contrast = (a,b) => (Math.max(a,b) + 0.05) / (Math.min(a,b) + 0.05);
+  if (fg !== null && contrast(bg,fg) >= 4.5) return preferred;
+  const dark = '#20242a', light = '#f3f6fa';
+  return contrast(bg,colorLuminance(dark)) >= contrast(bg,colorLuminance(light)) ? dark : light;
+}
+
 function renderGrid() {
   const sheet = getActiveSheet();
   const table = document.getElementById('excelGrid');
@@ -1305,7 +1322,13 @@ function renderGrid() {
       if (cell.size) styleStr += `font-size:${cell.size}pt;`;
       if (cell.bold) styleStr += `font-weight:bold;`;
       if (cell.bg) styleStr += `background-color:${cell.bg};`;
-      if (cell.color) styleStr += `color:${cell.color};`;
+      if (document.body.classList.contains('dark-mode')) {
+        const background = cell.bg || '#2b3038';
+        const desired = cell.color || '#e5e9ee';
+        styleStr += `color:${readableCellTextColor(background, desired)};`;
+      } else if (cell.color) {
+        styleStr += `color:${cell.color};`;
+      }
       if (cell.align) styleStr += `text-align:${cell.align};`;
 
       const memoClass = (cell.memo && cell.memo.trim() !== '') ? ' has-memo' : '';
@@ -2076,6 +2099,7 @@ function toggleDarkMode() {
   document.body.classList.toggle('dark-mode', dark);
   document.getElementById('darkModeToggle').textContent = dark ? '☀️ 라이트' : '🌙 다크';
   try { localStorage.setItem('web_excel_dark_mode', dark ? '1' : '0'); } catch(_) {}
+  renderGrid(); // 테마 변경 즉시 셀 대비 재계산
 }
 // 앱 열기: 비밀번호 없이 서버 데이터 1회 조회 / 저장: 4자리 PIN 검증
 let dbVersion = null;
