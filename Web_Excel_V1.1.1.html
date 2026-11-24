@@ -780,6 +780,8 @@ let isDragging = false;
 let isEditing = false;
 let editingTarget = { r: 0, c: 0 };
 let clipboard = null;
+// Ctrl+클릭 비연속 선택 집합. 일반 클릭/방향키 이동 시 초기화됩니다.
+let multiSelectedKeys = new Set();
 let fileHandle = null;
 
 function colToLetter(col) {
@@ -964,7 +966,7 @@ function createManualSheet() {
   sheet.merges.push({ row: 2, startCol: 0, endCol: 2 });
   setManualCell('A4', '• 그리드 범위: 열 A~Z (26열), 행 1~100 (100행) / 기본 폰트: 맑은 고딕 10pt (글자 크기·길이에 맞춰 셀 크기 자동 조절)');
   setManualCell('A5', '• 수식 셀 클릭 참조: 셀에 "=" 입력 후 다른 셀을 클릭하면 입력 상태를 유지한 채 해당 셀 번호가 자동 삽입됩니다.');
-  setManualCell('A6', '• 단축키 지원: Ctrl+Z (최대 50단계 실행취소), Ctrl+C / Ctrl+X / Ctrl+V (복사·잘라내기·붙여넣기), Delete (선택영역 값 삭제)');
+  setManualCell('A6', '• 단축키 지원: Ctrl+Z (최대 50단계 실행취소), Ctrl+C / Ctrl+X / Ctrl+V (복사·잘라내기·붙여넣기), Ctrl+클릭 (비연속 셀 서식 선택), Delete (선택영역 값 삭제)');
 
   setManualCell('A8', '2. 지원 수식 및 화학 계산 함수 (빈 셀에 "=" 로 시작해 단독 입력)', { bold: true, bg: '#f3f3f3' });
   sheet.merges.push({ row: 7, startCol: 0, endCol: 3 });
@@ -1430,6 +1432,12 @@ function attachGridEvents() {
     }
 
     const cell = sheet.cells[clickedKey];
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      toggleMultiCell(r, baseCol);
+      isDragging = false;
+      return;
+    }
     selectCell(r, baseCol);
     isDragging = true;
 
@@ -1469,7 +1477,9 @@ function attachGridEvents() {
     const rMax = Math.max(selection.startRow, selection.endRow);
     const cMin = Math.min(selection.startCol, selection.endCol);
     const cMax = Math.max(selection.startCol, selection.endCol);
-    if (r < rMin || r > rMax || c < cMin || c > cMax) {
+    if (multiSelectedKeys.size > 0) {
+      if (!multiSelectedKeys.has(cellKey(r,c))) selectCell(r,c);
+    } else if (r < rMin || r > rMax || c < cMin || c > cMax) {
       selectCell(r, c);
     }
 
@@ -1485,6 +1495,7 @@ function hideContextMenu() {
 }
 
 function selectCell(r, c) {
+  multiSelectedKeys.clear();
   const sheet = getActiveSheet();
   const merge = getMergeAt(sheet, r, c);
   const targetCol = merge ? merge.startCol : c;
@@ -1493,6 +1504,33 @@ function selectCell(r, c) {
   selection.startCol = targetCol;
   selection.endRow = r;
   selection.endCol = merge ? merge.endCol : targetCol;
+  updateSelectionUI();
+}
+
+function toggleMultiCell(r, c) {
+  const sheet = getActiveSheet();
+  const merge = getMergeAt(sheet,r,c);
+  const targetCol = merge ? merge.startCol : c;
+  const key = cellKey(r,targetCol);
+  if (!multiSelectedKeys.size) {
+    // 기존 연속 범위를 포함시켜 Ctrl+클릭으로 선택을 확장합니다.
+    const rMin=Math.min(selection.startRow,selection.endRow);
+    const rMax=Math.max(selection.startRow,selection.endRow);
+    const cMin=Math.min(selection.startCol,selection.endCol);
+    const cMax=Math.max(selection.startCol,selection.endCol);
+    for(let rr=rMin;rr<=rMax;rr++) for(let cc=cMin;cc<=cMax;cc++) {
+      const merged=getMergeAt(sheet,rr,cc);
+      multiSelectedKeys.add(cellKey(rr,merged?merged.startCol:cc));
+    }
+  }
+  // 첫 Ctrl+클릭은 기존 선택에 셀을 추가합니다. 다시 클릭하면 선택을 해제합니다.
+  if (multiSelectedKeys.has(key)) multiSelectedKeys.delete(key);
+  else multiSelectedKeys.add(key);
+  if (!multiSelectedKeys.size) multiSelectedKeys.add(key);
+  selection.startRow=r;
+  selection.endRow=r;
+  selection.startCol=targetCol;
+  selection.endCol=merge?merge.endCol:targetCol;
   updateSelectionUI();
 }
 
@@ -1520,6 +1558,19 @@ function updateSelectionUI() {
     if (ch) ch.classList.add('highlight');
   }
 
+  if (multiSelectedKeys.size) {
+    for (const key of multiSelectedKeys) {
+      const pos=parseCellKey(key);
+      if (!pos) continue;
+      const td=document.getElementById(`cell_${pos.r}_${pos.c}`);
+      if(td) td.classList.add('in-range');
+      const rh=document.getElementById(`row_h_${pos.r}`);
+      const ch=document.getElementById(`col_h_${pos.c}`);
+      if(rh) rh.classList.add('highlight');
+      if(ch) ch.classList.add('highlight');
+    }
+  }
+
   const activeTd = document.getElementById(`cell_${selection.startRow}_${selection.startCol}`);
   if (activeTd) {
     activeTd.classList.add('active-cell');
@@ -1533,7 +1584,9 @@ function updateSelectionUI() {
   const rangeLabel = (rMin === rMax && cMin === cMax)
     ? key
     : `${cellKey(rMin, cMin)}:${cellKey(rMax, cMax)}`;
-  document.getElementById('cellAddrBox').textContent = rangeLabel;
+  document.getElementById('cellAddrBox').textContent = multiSelectedKeys.size
+    ? `${multiSelectedKeys.size}개 셀`
+    : rangeLabel;
 
   if (!isEditing) {
     const formulaInput = document.getElementById('formulaInput');
@@ -1776,11 +1829,22 @@ function getSelectedKeys() {
   return keys;
 }
 
+// 서식 변경만 비연속 선택 셀을 사용합니다. 복사/잘라내기/붙여넣기는 기존 범위 동작 유지.
+function getFormattingKeys() {
+  if (multiSelectedKeys.size) {
+    return [...multiSelectedKeys].map(key => {
+      const pos=parseCellKey(key);
+      return pos ? {r:pos.r,c:pos.c,key} : null;
+    }).filter(Boolean);
+  }
+  return getSelectedKeys();
+}
+
 function applyFontSize(sizeVal) {
   pushHistory();
   const sheet = getActiveSheet();
   const size = parseInt(sizeVal, 10);
-  getSelectedKeys().forEach(({ key }) => {
+  getFormattingKeys().forEach(({ key }) => {
     if (!sheet.cells[key]) sheet.cells[key] = {};
     sheet.cells[key].size = size;
   });
@@ -1793,7 +1857,7 @@ function toggleBold() {
   const sheet = getActiveSheet();
   const firstKey = cellKey(selection.startRow, selection.startCol);
   const nextBold = !(sheet.cells[firstKey] && sheet.cells[firstKey].bold);
-  getSelectedKeys().forEach(({ key }) => {
+  getFormattingKeys().forEach(({ key }) => {
     if (!sheet.cells[key]) sheet.cells[key] = {};
     sheet.cells[key].bold = nextBold;
   });
@@ -1804,7 +1868,7 @@ function toggleBold() {
 function applyBgColor(color) {
   pushHistory();
   const sheet = getActiveSheet();
-  getSelectedKeys().forEach(({ key }) => {
+  getFormattingKeys().forEach(({ key }) => {
     if (!sheet.cells[key]) sheet.cells[key] = {};
     sheet.cells[key].bg = color;
   });
@@ -1815,7 +1879,7 @@ function applyBgColor(color) {
 function applyTextColor(color) {
   pushHistory();
   const sheet = getActiveSheet();
-  getSelectedKeys().forEach(({ key }) => {
+  getFormattingKeys().forEach(({ key }) => {
     if (!sheet.cells[key]) sheet.cells[key] = {};
     sheet.cells[key].color = color;
   });
@@ -1826,7 +1890,7 @@ function applyTextColor(color) {
 function applyAlign(align) {
   pushHistory();
   const sheet = getActiveSheet();
-  getSelectedKeys().forEach(({ key }) => {
+  getFormattingKeys().forEach(({ key }) => {
     if (!sheet.cells[key]) sheet.cells[key] = {};
     sheet.cells[key].align = align;
   });
@@ -1837,7 +1901,7 @@ function applyAlign(align) {
 function changeDecimals(delta) {
   pushHistory();
   const sheet = getActiveSheet();
-  getSelectedKeys().forEach(({ key }) => {
+  getFormattingKeys().forEach(({ key }) => {
     const val = evaluateCell(sheet, key);
     if (typeof val === 'number') {
       if (!sheet.cells[key]) sheet.cells[key] = {};
