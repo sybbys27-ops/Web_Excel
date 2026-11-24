@@ -715,6 +715,7 @@ body.dark-mode .memo-modal-close {color:#e4e8ee}
     <div onclick="unmergeCells(); hideContextMenu();">↩ 병합 해제</div>
     <hr />
     <div onclick="copySelection(); hideContextMenu();">📋 복사 (Ctrl+C)</div>
+    <div onclick="cutSelection(); hideContextMenu();">✂️ 잘라내기 (Ctrl+X)</div>
     <div onclick="pasteSelection(); hideContextMenu();">📥 붙여넣기 (Ctrl+V)</div>
     <div onclick="clearSelectionValues(); hideContextMenu();">🧹 내용 지우기 (Del)</div>
   </div>
@@ -963,7 +964,7 @@ function createManualSheet() {
   sheet.merges.push({ row: 2, startCol: 0, endCol: 2 });
   setManualCell('A4', '• 그리드 범위: 열 A~Z (26열), 행 1~100 (100행) / 기본 폰트: 맑은 고딕 10pt (글자 크기·길이에 맞춰 셀 크기 자동 조절)');
   setManualCell('A5', '• 수식 셀 클릭 참조: 셀에 "=" 입력 후 다른 셀을 클릭하면 입력 상태를 유지한 채 해당 셀 번호가 자동 삽입됩니다.');
-  setManualCell('A6', '• 단축키 지원: Ctrl+Z (최대 50단계 실행취소), Ctrl+C / Ctrl+V (복사 및 수식 상대참조 붙여넣기), Delete (선택영역 값 삭제)');
+  setManualCell('A6', '• 단축키 지원: Ctrl+Z (최대 50단계 실행취소), Ctrl+C / Ctrl+X / Ctrl+V (복사·잘라내기·붙여넣기), Delete (선택영역 값 삭제)');
 
   setManualCell('A8', '2. 지원 수식 및 화학 계산 함수 (빈 셀에 "=" 로 시작해 단독 입력)', { bold: true, bg: '#f3f3f3' });
   sheet.merges.push({ row: 7, startCol: 0, endCol: 3 });
@@ -1730,6 +1731,11 @@ function bindGlobalEvents() {
         pasteSelection();
         return;
       }
+      if (e.key.toLowerCase() === 'x') {
+        e.preventDefault();
+        cutSelection();
+        return;
+      }
       if (e.key.toLowerCase() === 's') {
         e.preventDefault();
         saveToJsonFile();
@@ -1902,58 +1908,99 @@ function unmergeCells() {
   renderGrid();
 }
 
-function copySelection() {
+// Ctrl+X는 붙여넣기가 성공할 때 원본 셀을 삭제합니다.
+// 기존 Ctrl+C는 상대 참조 수식을 조정하지만, Ctrl+X의 이동 수식은 원문을 유지합니다.
+function selectedRect() {
+  return {
+    rMin: Math.min(selection.startRow, selection.endRow),
+    rMax: Math.max(selection.startRow, selection.endRow),
+    cMin: Math.min(selection.startCol, selection.endCol),
+    cMax: Math.max(selection.startCol, selection.endCol)
+  };
+}
+function rectTouchesMerge(sheet, rMin, rMax, cMin, cMax) {
+  return (sheet.merges || []).some(m =>
+    m.row >= rMin && m.row <= rMax && m.startCol <= cMax && m.endCol >= cMin);
+}
+function copySelection(mode = 'copy') {
   const sheet = getActiveSheet();
-  const rMin = Math.min(selection.startRow, selection.endRow);
-  const rMax = Math.max(selection.startRow, selection.endRow);
-  const cMin = Math.min(selection.startCol, selection.endCol);
-  const cMax = Math.max(selection.startCol, selection.endCol);
-
+  const {rMin, rMax, cMin, cMax} = selectedRect();
+  if (mode === 'cut' && rectTouchesMerge(sheet,rMin,rMax,cMin,cMax)) {
+    showDbToast('병합 셀은 병합 해제 후 잘라내세요.', 'error', 3200);
+    return;
+  }
   const data = [];
   for (let r = rMin; r <= rMax; r++) {
-    const rowArr = [];
+    const row = [];
     for (let c = cMin; c <= cMax; c++) {
-      const cell = sheet.cells[cellKey(r, c)];
-      rowArr.push(cell ? JSON.parse(JSON.stringify(cell)) : null);
+      const cell = sheet.cells[cellKey(r,c)];
+      row.push(cell ? JSON.parse(JSON.stringify(cell)) : null);
     }
-    data.push(rowArr);
+    data.push(row);
   }
-  clipboard = { baseRow: rMin, baseCol: cMin, data };
-  document.getElementById('statusInfo').textContent = `복사됨 (${cellKey(rMin, cMin)}:${cellKey(rMax, cMax)})`;
+  clipboard = { mode, sheetId: sheet.id, baseRow:rMin, baseCol:cMin, data };
+  const status = mode === 'cut' ? '잘라내기 대기' : '복사됨';
+  document.getElementById('statusInfo').textContent =
+    `${status} (${cellKey(rMin,cMin)}:${cellKey(rMax,cMax)})`;
 }
-
+function cutSelection() {
+  copySelection('cut');
+}
 function pasteSelection() {
   if (!clipboard) return;
-  pushHistory();
   const sheet = getActiveSheet();
-  const targetR = selection.startRow;
-  const targetC = selection.startCol;
+  const targetR = selection.startRow, targetC = selection.startCol;
+  const rows = clipboard.data.length;
+  const cols = clipboard.data[0].length;
+  if (targetR + rows > ROWS || targetC + cols > COLS) {
+    showDbToast('붙여넣기 범위가 시트 경계를 벗어납니다.', 'error', 3200);
+    return;
+  }
+  if (clipboard.mode === 'cut') {
+    const source = workbook.sheets.find(s => s.id === clipboard.sheetId);
+    if (!source) {
+      showDbToast('원본 시트를 찾을 수 없습니다.', 'error', 3200);
+      return;
+    }
+    if (rectTouchesMerge(sheet,targetR,targetR+rows-1,targetC,targetC+cols-1)) {
+      showDbToast('병합 셀 위치에는 잘라내기를 붙일 수 없습니다.', 'error', 3200);
+      return;
+    }
+    // 현재 실행취소 기록은 시트 단위이므로 다른 시트로 이동하는 경우는
+    // 안전한 undo 지원 전까지 막습니다.
+    if (source !== sheet) {
+      showDbToast('시트 간 잘라내기 이동은 지원하지 않습니다. 복사를 사용하세요.', 'error', 3500);
+      return;
+    }
+  }
+  pushHistory();
   const dRow = targetR - clipboard.baseRow;
   const dCol = targetC - clipboard.baseCol;
-
-  for (let i = 0; i < clipboard.data.length; i++) {
-    for (let j = 0; j < clipboard.data[i].length; j++) {
-      const destR = targetR + i;
-      const destC = targetC + j;
-      if (destR >= ROWS || destC >= COLS) continue;
-
+  if (clipboard.mode === 'cut') {
+    const source = workbook.sheets.find(s => s.id === clipboard.sheetId);
+    for(let i=0;i<rows;i++) {
+      for(let j=0;j<cols;j++) delete source.cells[cellKey(clipboard.baseRow+i,clipboard.baseCol+j)];
+    }
+  }
+  for (let i = 0; i < rows; i++) {
+    for (let j = 0; j < cols; j++) {
+      const destKey = cellKey(targetR+i,targetC+j);
       const srcCell = clipboard.data[i][j];
-      const destKey = cellKey(destR, destC);
       if (!srcCell) {
         delete sheet.cells[destKey];
       } else {
         const cloned = JSON.parse(JSON.stringify(srcCell));
-        if (cloned.raw && cloned.raw.startsWith('=')) {
-          cloned.raw = shiftFormulaReferences(cloned.raw, dRow, dCol);
+        if (clipboard.mode !== 'cut' && cloned.raw && cloned.raw.startsWith('=')) {
+          cloned.raw = shiftFormulaReferences(cloned.raw,dRow,dCol);
         }
         sheet.cells[destKey] = cloned;
       }
     }
   }
+  if (clipboard.mode === 'cut') clipboard = null;
   saveToLocalStorage();
   renderGrid();
 }
-
 function shiftFormulaReferences(formula, dRow, dCol) {
   return formula.replace(/\b([A-Za-z]{1,2})(\d{1,3})\b/g, (match, colStr, rowStr) => {
     const c = letterToCol(colStr);
