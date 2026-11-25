@@ -741,7 +741,7 @@ body.dark-mode .memo-modal-close {color:#e4e8ee}
   <input type="file" id="hiddenFileInput" accept=".json" style="display:none" onchange="handleFileSelect(event)" />
 
 <script>
-const ROWS = 100;
+const ROWS = 150;
 const COLS = 26;
 const STORAGE_KEY = 'web_excel_v1_10_data';
 const LEGACY_STORAGE_KEY = 'web_excel_v1_0_0_data';
@@ -964,7 +964,7 @@ function createManualSheet() {
 
   setManualCell('A3', '1. 기본 규격 및 조작법', { bold: true, bg: '#f3f3f3' });
   sheet.merges.push({ row: 2, startCol: 0, endCol: 2 });
-  setManualCell('A4', '• 그리드 범위: 열 A~Z (26열), 행 1~100 (100행) / 기본 폰트: 맑은 고딕 10pt (글자 크기·길이에 맞춰 셀 크기 자동 조절)');
+  setManualCell('A4', '• 그리드 범위: 열 A~Z (26열), 행 1~150 (150행) / 기본 폰트: 맑은 고딕 10pt (글자 크기·길이에 맞춰 셀 크기 자동 조절)');
   setManualCell('A5', '• 수식 셀 클릭 참조: 셀에 "=" 입력 후 다른 셀을 클릭하면 입력 상태를 유지한 채 해당 셀 번호가 자동 삽입됩니다.');
   setManualCell('A6', '• 단축키 지원: Ctrl+Z (최대 50단계 실행취소), Ctrl+C / Ctrl+X / Ctrl+V (복사·잘라내기·붙여넣기), Ctrl+클릭 (비연속 셀 서식 선택), Delete (선택영역 값 삭제)');
 
